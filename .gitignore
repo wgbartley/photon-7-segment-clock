@@ -1,0 +1,8 @@
+compile.sh
+deploy.sh
+device_id
+verify.sh
+output
+elapsedMillis
+PietteTech_DHT
+SparkCore-NeoPixel
