@@ -22,12 +22,12 @@ double dhtHumidity = 0;
 double dhtDewPoint = 0;
 
 // Outside weather
-float kchaFahrenheit = 0;
-float kchaHumidity = 0;
-uint32_t kchaTimestamp = 0;
-elapsedMillis kchaTimer = 0;
-uint32_t kchaInterval = 0;
-static const uint32_t kchaMaxInterval = 3600000;
+float wxFahrenheit = 0;
+float wxHumidity = 0;
+uint32_t wxTimestamp = 0;
+elapsedMillis wxTimer = 0;
+uint32_t wxInterval = 3600000;
+char wxStation[5] = "KCHA";
 
 
 void randomColor();
@@ -43,6 +43,8 @@ void displayHour12();
 void displayHour24();
 void displayMinute();
 void displayColon();
+
+uint16_t weather_checked_i = 0;
 
 
 #define bitRead(value, bit) (((value) >> (bit)) & 0x01)
@@ -73,6 +75,11 @@ static const byte n9 = 0B01001111;
 // Address 6 = Green
 // Address 7 = Blue
 // Address 8 = Rainbow delay
+// Address 9 = Station code, 1st letter
+// Address 10 = Station code, 2nd letter
+// Address 11 = Station code, 3rd letter
+// Address 12 = Station code, 4th letter
+// Address 13 = Brightness
 
 int8_t timeZone = 0;
 bool time12Hour = false;
@@ -90,10 +97,40 @@ uint8_t LAST_EFFECT_MODE = EFFECT_MODE;
 uint8_t currEffect = EFFECT_MODE;
 uint16_t RAINBOW_DELAY = 50;
 uint8_t LAST_MINUTE = 0;
+uint8_t BRIGHTNESS = 255;
+
+SYSTEM_MODE(SEMI_AUTOMATIC);
+bool has_booted = false;
+
+void ledChangeHandler(uint8_t r, uint8_t g, uint8_t b) {
+    if(EFFECT_MODE==2 || EFFECT_MODE==3)
+        return;
+
+    // Initial boot, control all teh LEDs
+    if(!Particle.connected() && !has_booted) {
+        for(uint8_t i=0; i<PIXEL_COUNT; i++)
+            strip.setPixelColor(i, strip.Color(r, g, b));
+
+        strip.show();
+
+    // If we've booted at least once, only show the LED color
+    } else {
+        strip.setPixelColor(28, strip.Color(r, g, b));
+        strip.setPixelColor(29, strip.Color(r, g, b));
+    }
+}
 
 void setup() {
     strip.begin();
     strip.show();
+
+    RGB.onChange(ledChangeHandler);
+
+    while(!Particle.connected()) {
+        Particle.connect();
+        Particle.process();
+        delay(1);
+    }
 
     for(uint8_t i=0; i<PIXEL_COUNT; i++) {
         strip.setPixelColor(i, strip.Color(255, 255, 255));
@@ -104,6 +141,8 @@ void setup() {
         strip.show();
         delay(10);
     }
+    
+    blackOut();
 
     Spark.variable("Fahrenheit", &dhtFahrenheit, DOUBLE);
     Spark.variable("Humidity", &dhtHumidity, DOUBLE);
@@ -113,7 +152,8 @@ void setup() {
 
     Spark.function("function", fnRouter);
 
-    Spark.subscribe("hook-response/get_weather_kcha", doWeather, MY_DEVICES);
+    Spark.subscribe("hook-response/get_weather_gov", doWeather, MY_DEVICES);
+    Spark.publish("get_weather_gov", wxStation);
 
     // See if this EEPROM has saved data
     if(EEPROM.read(0)==117) {
@@ -135,6 +175,12 @@ void setup() {
         color[0] = EEPROM.read(5);
         color[1] = EEPROM.read(6);
         color[2] = EEPROM.read(7);
+
+        wxStation[0] = char(EEPROM.read(9));
+        wxStation[1] = char(EEPROM.read(10));
+        wxStation[2] = char(EEPROM.read(11));
+        wxStation[3] = char(EEPROM.read(12));
+        BRIGHTNESS = EEPROM.read(13);
 
         RAINBOW_DELAY = EEPROM.read(8);
 
@@ -158,12 +204,21 @@ void setup() {
         EEPROM.write(7, 128);
         // Rainbow delay
         EEPROM.write(8, RAINBOW_DELAY);
+        // Weather station
+        EEPROM.write(9, int("K"));
+        EEPROM.write(10, int("C"));
+        EEPROM.write(11, int("H"));
+        EEPROM.write(12, int("A"));
+        EEPROM.write(13, 255);
     }
 
     Time.zone(timeZone);
 
     blackOut();
+    strip.setBrightness(BRIGHTNESS);
     strip.show();
+
+    has_booted = true;
 }
 
 
@@ -180,6 +235,11 @@ void loop() {
 
         timerReset = 0;
     }
+
+    if(!Particle.connected())
+        Particle.connect();
+
+    Particle.process();
 }
 
 
@@ -236,6 +296,7 @@ int fnRouter(String command) {
     // Lazy way to reboot
     } else if(command.equals("REBOOT")) {
         resetFlag = true;
+        timerReset = 0;
         return 1;
 
 
@@ -295,6 +356,9 @@ int fnRouter(String command) {
         EEPROM.write(4, EFFECT_MODE);
         intervalEffect = 0;
 
+        if(EFFECT_MODE==3)
+            Spark.publish("get_weather_gov", wxStation);
+
         return EFFECT_MODE;
 
 
@@ -322,14 +386,38 @@ int fnRouter(String command) {
     // Get the value of red
     } else if(command.equals("GETRED")) {
         return color[0];
-        
+
     // Get the value of green
     } else if(command.equals("GETGREEN")) {
         return color[1];
-        
+
     // Get the value of blue
     } else if(command.equals("GETBLUE")) {
         return color[2];
+
+    // Set the weather station
+    } else if(command.substring(0, 13)=="SETWXSTATION,") {
+        String station = command.substring(13);
+        station.toUpperCase();
+        station.toCharArray(wxStation, 5);
+
+        EEPROM.write(9, int(wxStation[0]));
+        EEPROM.write(10, int(wxStation[1]));
+        EEPROM.write(11, int(wxStation[2]));
+        EEPROM.write(12, int(wxStation[3]));
+
+        return int(wxStation[0])+int(wxStation[1])+int(wxStation[2])+int(wxStation[3]);
+
+    // Force weather update
+    } else if(command.equals("UPDATEWX")) {
+        Spark.publish("get_weather_gov", wxStation);
+        return 1;
+
+    // Brightness
+    } else if(command.substring(0, 14)=="SETBRIGHTNESS,") {
+        strip.setBrightness(command.substring(14).toInt());
+        EEPROM.write(13, command.substring(14).toInt());
+        return command.substring(14).toInt();
     }
 
 
@@ -457,8 +545,11 @@ void doDHT22() {
                 dhtFahrenheit = DHT.getFahrenheit();
                 dhtDewPoint = DHT.getDewPoint();
 
-                String pub = "{\"h\":" + String((float)dhtHumidity) + ",\"f\":" + String((float)dhtFahrenheit) + ",\"d\":" + String((float)dhtDewPoint) + "}";
-                Spark.publish("environmentals", pub, 2);
+                //String pub = "{\"h\":" + String((float)dhtHumidity) + ",\"f\":" + String((float)dhtFahrenheit) + ",\"d\":" + String((float)dhtDewPoint) + "}";
+                //Spark.publish("environmentals", pub, 2);
+
+                String pub = "h:"+String((float)dhtHumidity)+"|g,f:"+String((float)dhtFahrenheit)+"|g";
+                Spark.publish("statsd", pub, 60);
             }
 
             dhtStarted = false;
@@ -654,8 +745,8 @@ void displayMinute() {
 
 
 void displayColon() {
-    strip.setPixelColor(28, strip.Color(color[0], color[1], color[2]));
-    strip.setPixelColor(29, strip.Color(color[0], color[1], color[2]));
+    //strip.setPixelColor(28, strip.Color(color[0], color[1], color[2]));
+    //strip.setPixelColor(29, strip.Color(color[0], color[1], color[2]));
 }
 
 
@@ -673,6 +764,9 @@ void doEffectMode() {
     if(timerEffect>=intervalEffect) {
         timerEffect = 0;
 
+        // if(Time.hour()==13 && Time.minute()==37)
+        //     EFFECT_MODE = 77;
+
         switch(EFFECT_MODE) {
             case 1: // Rainbow
                 doEffectRainbow();
@@ -686,13 +780,16 @@ void doEffectMode() {
 
             case 3: // Internet temp/humidity
                 doEffectEnvironmentals(false);
-                kchaInterval = 0;
                 intervalEffect = 1000;
                 break;
 
             case 4: // Cycle
                 //doTime();
                 //intervalEffect = 5000;
+
+            case 77: // L33t
+                doLeet();
+                break;
 
             case 0: // Time
             default:
@@ -719,6 +816,9 @@ void doEffectRainbow() {
         if(EFFECT_MODE!=1) break;
 
         for(i=0; i<strip.numPixels(); i++) {
+            if(i==28 || i==29)
+                continue;
+
             if(strip.getPixelColor(i)>0)
                 strip.setPixelColor(i, Wheel((i+j) & 255));
         }
@@ -727,6 +827,20 @@ void doEffectRainbow() {
         delay(RAINBOW_DELAY);
         Spark.process();
     }
+}
+
+
+void doLeet() {
+    displayHour();
+    displayMinute();
+    displayColon();
+
+    for(uint8_t i=0; i<strip.numPixels(); i++)
+        if(strip.getPixelColor(i)>0)
+            strip.setPixelColor(i, strip.Color(0, 255, 0));
+
+    strip.show();
+    Spark.process();
 }
 
 
@@ -743,8 +857,8 @@ void doEffectEnvironmentals(bool local) {
         strip.setPixelColor(28, strip.Color(0, 255, 0));
         strip.setPixelColor(29, strip.Color(0, 0, 0));
     } else {
-        _f = (int) kchaFahrenheit;
-        _h = (int) kchaHumidity;
+        _f = (int) wxFahrenheit;
+        _h = (int) wxHumidity;
 
         strip.setPixelColor(28, strip.Color(0, 0, 0));
         strip.setPixelColor(29, strip.Color(0, 255, 0));
@@ -898,11 +1012,10 @@ void doEffectEnvironmentals(bool local) {
 
 
 void checkWeather() {
-    if(kchaTimer>=kchaInterval) {
-        Spark.publish("get_weather_kcha");
+    if(wxTimer>=wxInterval) {
+        Spark.publish("get_weather_gov", wxStation);
 
-        kchaInterval = kchaMaxInterval;
-        kchaTimer = 0;
+        wxTimer = 0;
     }
 }
 
@@ -915,12 +1028,12 @@ void doWeather(const char *name, const char *data) {
     String humidity = tryExtractString(str, "<relative_humidity>", "</relative_humidity>");
 
     if(temp_f!=NULL) {
-        kchaFahrenheit = temp_f.toFloat();
-        kchaTimestamp = Time.now();
+        wxFahrenheit = temp_f.toFloat();
+        wxTimestamp = Time.now();
     }
 
     if(humidity!=NULL)
-        kchaHumidity = humidity.toFloat();
+        wxHumidity = humidity.toFloat();
 
     if(EFFECT_MODE==3)
         doEffectEnvironmentals(false);
